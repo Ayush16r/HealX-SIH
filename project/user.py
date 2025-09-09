@@ -1,85 +1,69 @@
-from flask import Flask, render_template, request, jsonify, redirect, url_for
-import csv
-import os
+from flask import Flask, render_template, request, jsonify
+from pymongo import MongoClient
 
 app = Flask(__name__)
 
-# File paths
-DEMOGRAPHICS_CSV = "demographics.csv"
-LIVE_APPOINTMENTS_CSV = "live_appointments.csv"
+# ---------------- MongoDB Setup ----------------
+MONGO_URI = "mongodb+srv://ayush16r:Ayush16r@healxtrail.nlpleiz.mongodb.net/?retryWrites=true&w=majority&appName=HealXtrail"
+client = MongoClient(MONGO_URI)
+db = client["medifind"]
+bookings_col = db["bookings"]
 
-# Ensure both CSV files have headers if they don't exist
-if not os.path.exists(DEMOGRAPHICS_CSV):
-    with open(DEMOGRAPHICS_CSV, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Name", "Age", "Gender"])  # adjust headers to your form
-
-if not os.path.exists(LIVE_APPOINTMENTS_CSV):
-    with open(LIVE_APPOINTMENTS_CSV, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Specialty", "Date", "Location"])  # adjust headers to your form
-
+# Expected time per department (minutes per patient)
+DEPT_TIME = {
+    "General Medicine": 4,
+    "Orthopedics": 3,
+    "ENT": 5,
+    "Dermatology": 4
+}
 
 # ---------------- ROUTES ----------------
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
 @app.route("/live-appointments")
 def live_appointments():
     return render_template("live_appointments.html")
-
 
 @app.route("/hospitals-near-me")
 def hospitals_near_me():
     return render_template("hospitals_near_me.html")
 
-
 @app.route("/med_box")
 def med_box():
     return render_template("med_box.html")
 
-
-# -------- SAVE DEMOGRAPHICS --------
-@app.route("/save_demographics", methods=["POST"])
-def save_demographics():
+# ---------------- GET BOOKING WITH ESTIMATED WAIT ----------------
+@app.route("/get_booking", methods=["POST"])
+def get_booking():
     data = request.get_json()
-    if not data:
-        return jsonify({"message": "❌ No data received"}), 400
+    booking_id = data.get("bookingId") if data else None
+    if not booking_id:
+        return jsonify({"error": "No Booking ID provided"}), 400
 
-    file_exists = os.path.isfile(DEMOGRAPHICS_CSV)
+    booking = bookings_col.find_one({"booking_id": booking_id})
+    if not booking:
+        return jsonify({"error": "Booking ID not found"}), 404
 
-    with open(DEMOGRAPHICS_CSV, "a", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=data.keys())
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(data)
+    department = booking.get("department", "General Medicine")
+    per_patient_time = DEPT_TIME.get(department, 5)  # e.g., 5 mins default
 
-    return jsonify({"message": "✅ Demographics saved!"})
+    # Use created_at timestamp to count previous uncompleted bookings
+    queue_count = bookings_col.count_documents({
+        "department": department,
+        "status": {"$ne": "completed"},
+        "created_at": {"$lt": booking["created_at"]}
+    })
 
+    estimated_wait = queue_count * per_patient_time
 
-# -------- SAVE LIVE APPOINTMENTS --------
-@app.route("/save_live_appointment", methods=["POST"])
-def save_live_appointment():
-    specialty = request.form.get("specialty")
-    date = request.form.get("date")
-    location = request.form.get("location")
-
-    with open(LIVE_APPOINTMENTS_CSV, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([specialty, date, location])
-
-    return redirect(url_for("hospitals_near_me"))
-
-
-# -------- SEARCH FEATURE --------
-@app.route("/search")
-def search():
-    query = request.args.get("q", "")
-    return render_template("search_results.html", query=query)
+    return jsonify({
+        "slot": booking.get("appointment_time", ""),
+        "name": booking.get("patient_name", ""),
+        "estimated_wait": estimated_wait
+    })
 
 
-# ---------------- RUN APP ----------------
 if __name__ == "__main__":
     app.run(debug=True)
